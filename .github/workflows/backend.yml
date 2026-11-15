@@ -1,7 +1,8 @@
-# Backends: compila los servicios que cambiaron y, en main, los publica en ECR y actualiza ECS.
-# - Pull request: solo compila (sin tocar AWS).
-# - Push a main: compila + imagen en ECR + nueva revisión de la task definition + espera a que ECS quede estable.
-# - Manual (Actions -> Backend -> Run workflow): despliega el servicio que elijas, o los 4.
+# Backends: compila los servicios que cambiaron y, en main, sube sus imágenes y actualiza el stack saas-app.
+# - Pull request: solo compila.
+# - Push a main: compila, sube la imagen a ECR (etiqueta = commit) y cambia la etiqueta en CloudFormation;
+#   ECS reemplaza las tareas sin cortar el servicio y revierte solo si la nueva versión no arranca.
+# - Manual (Actions -> Backend -> Run workflow): el servicio que elijas, o los 4.
 # Un cambio en libs/ o en el Dockerfile despliega los 4 servicios.
 name: Backend
 
@@ -29,11 +30,6 @@ on:
 
 permissions:
   contents: read
-
-# Nunca dos despliegues a la vez sobre la misma rama, y nunca se cancela uno a medias
-concurrency:
-  group: backend-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   cambios:
@@ -110,60 +106,49 @@ jobs:
       - name: Compilar y probar
         run: mvn -B -f services/${{ matrix.servicio }}/pom.xml verify
 
-  desplegar:
-    name: Desplegar ${{ matrix.servicio }}
+  imagenes:
+    name: Imágenes
     needs: [cambios, compilar]
     # Solo en main y cuando AWS ya está conectado (variable AWS_ROLE_ARN definida en GitHub)
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != '' && needs.cambios.outputs.servicios != '[]'
+    uses: ./.github/workflows/imagenes.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      servicios: ${{ needs.cambios.outputs.servicios }}
+      tag: ${{ github.sha }}
+
+  desplegar:
+    name: Desplegar (saas-app)
+    needs: [cambios, imagenes]
     runs-on: ubuntu-latest
     environment: production
     permissions:
       contents: read
-      id-token: write          # OIDC: GitHub obtiene credenciales temporales de AWS, sin claves guardadas
-    strategy:
-      fail-fast: false
-      matrix:
-        servicio: ${{ fromJSON(needs.cambios.outputs.servicios) }}
+      id-token: write
     steps:
       - uses: actions/checkout@v7
-
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: ecr
-
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Imagen en ECR
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.backend
-          build-args: SERVICE=${{ matrix.servicio }}
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          tags: ${{ steps.ecr.outputs.registry }}/saas/${{ matrix.servicio }}:${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.servicio }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.servicio }}
-
-      # Toma la task definition ACTIVA de ECS (variables y secretos incluidos) y solo cambia la imagen
-      - name: Nueva revisión de la task definition
-        id: td
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition-family: saas-${{ matrix.servicio }}
-          container-name: app
-          image: ${{ steps.ecr.outputs.registry }}/saas/${{ matrix.servicio }}:${{ github.sha }}
-
-      - name: Desplegar en ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.td.outputs.task-definition }}
-          cluster: ${{ vars.ECS_CLUSTER }}
-          service: ${{ matrix.servicio }}
-          wait-for-service-stability: true
-          wait-for-minutes: 15
+      - name: Nueva etiqueta de imagen en CloudFormation
+        env:
+          SERVICIOS: ${{ needs.cambios.outputs.servicios }}
+          TAG: ${{ github.sha }}
+        run: |
+          if ! aws cloudformation describe-stacks --stack-name saas-app > /dev/null 2>&1; then
+            echo "::notice::El stack saas-app aún no existe: lo crea el pipeline Infraestructura con estas imágenes."
+            exit 0
+          fi
+          ARGS=()
+          for s in $(echo "$SERVICIOS" | jq -r '.[]'); do
+            case "$s" in
+              user-service)         ARGS+=("UserImageTag=$TAG") ;;
+              catalog-service)      ARGS+=("CatalogImageTag=$TAG") ;;
+              subscription-service) ARGS+=("SubscriptionImageTag=$TAG") ;;
+              notification-service) ARGS+=("NotificationImageTag=$TAG") ;;
+            esac
+          done
+          infra/scripts/desplegar-stack.sh app "${ARGS[@]}"

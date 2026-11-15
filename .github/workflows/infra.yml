@@ -1,0 +1,158 @@
+# Infraestructura como código: aplica las plantillas de infra/ con CloudFormation.
+# - Pull request: valida las plantillas (cfn-lint), sin tocar AWS.
+# - Push a main (infra/ o database/) o manual:
+#     1. stack saas-base (red, RDS, EFS, ECR, cluster, bucket)
+#     2. migrador de la base (crea saas_app, carga schema.sql la primera vez, aplica V26+)
+#     3. la primera vez: imágenes de los 4 servicios
+#     4. stack saas-app (balanceador, RabbitMQ, servicios, CloudFront)
+#     5. la primera vez: publica el frontend
+name: Infraestructura
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "database/**"
+      - ".github/workflows/infra.yml"
+  pull_request:
+    paths:
+      - "infra/**"
+      - "database/**"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    name: Validar plantillas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: cfn-lint
+        run: |
+          pipx install cfn-lint==1.60.1
+          cfn-lint --regions us-east-2 -- infra/*.yml
+      - name: Scripts
+        run: for f in infra/scripts/*.sh database/migrar.sh; do bash -n "$f"; done
+
+  base:
+    name: Stack saas-base
+    needs: validar
+    # Solo en main y cuando AWS ya está conectado (variable AWS_ROLE_ARN definida en GitHub)
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      primera_vez: ${{ steps.app.outputs.primera_vez }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Secretos en Parameter Store
+        run: infra/scripts/verificar-secretos.sh
+      - name: Desplegar saas-base
+        run: infra/scripts/desplegar-stack.sh base
+      - name: ¿Existe ya saas-app?
+        id: app
+        run: |
+          if aws cloudformation describe-stacks --stack-name saas-app \
+               --query 'Stacks[0].StackStatus' --output text 2>/dev/null | grep -qv ROLLBACK_COMPLETE; then
+            echo "primera_vez=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "primera_vez=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  migrador:
+    name: Migrar base de datos
+    needs: base
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/setup-buildx-action@v4
+      - name: Imagen del migrador
+        uses: docker/build-push-action@v7
+        with:
+          context: database
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/saas/db-migrator:latest
+            ${{ steps.ecr.outputs.registry }}/saas/db-migrator:${{ github.sha }}
+      - name: Ejecutar migrador
+        run: infra/scripts/migrar-base-de-datos.sh
+
+  imagenes:
+    name: Imágenes iniciales
+    needs: base
+    if: needs.base.outputs.primera_vez == 'true'
+    uses: ./.github/workflows/imagenes.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      servicios: '["user-service","catalog-service","subscription-service","notification-service"]'
+      tag: ${{ github.sha }}
+
+  app:
+    name: Stack saas-app
+    needs: [base, migrador, imagenes]
+    if: >-
+      always() && needs.base.result == 'success' && needs.migrador.result == 'success' &&
+      (needs.imagenes.result == 'success' || needs.imagenes.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Desplegar saas-app
+        env:
+          PRIMERA_VEZ: ${{ needs.base.outputs.primera_vez }}
+          TAG: ${{ github.sha }}
+        run: |
+          if [ "$PRIMERA_VEZ" = "true" ]; then
+            # La primera vez (unos 25 min: CloudFront y el origen VPC tardan en propagarse)
+            infra/scripts/desplegar-stack.sh app UserImageTag=$TAG CatalogImageTag=$TAG \
+              SubscriptionImageTag=$TAG NotificationImageTag=$TAG
+          else
+            infra/scripts/desplegar-stack.sh app          # las imágenes conservan su etiqueta actual
+          fi
+      - name: Dirección de la plataforma
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name saas-app \
+            --query "Stacks[0].Outputs[?OutputKey=='Url'].OutputValue" --output text)
+          echo "### Plataforma: $URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Plataforma: $URL"
+
+  frontend:
+    name: Frontend inicial
+    needs: [base, app]
+    if: always() && needs.app.result == 'success' && needs.base.outputs.primera_vez == 'true'
+    uses: ./.github/workflows/frontend.yml
+    permissions:
+      contents: read
+      id-token: write

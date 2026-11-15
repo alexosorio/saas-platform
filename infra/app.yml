@@ -1,0 +1,573 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  SaaS Platform - aplicación: balanceador interno, RabbitMQ, los 4 servicios en ECS Fargate y
+  CloudFront (frontend en S3 + APIs por origen VPC). Sin dominio propio: todo sale por la
+  dirección *.cloudfront.net. Depende del stack saas-base.
+
+Parameters:
+  BaseStack:
+    Type: String
+    Default: saas-base
+  UserImageTag:
+    Type: String
+    Description: Etiqueta de la imagen saas/user-service (el pipeline pone el commit)
+  CatalogImageTag:
+    Type: String
+  SubscriptionImageTag:
+    Type: String
+  NotificationImageTag:
+    Type: String
+  MailFrom:
+    Type: String
+    Description: Remitente verificado en SendGrid
+  MailFromName:
+    Type: String
+    Default: SaaS Platform
+  BrandName:
+    Type: String
+    Default: SaaS Platform
+  WhatsAppPhoneNumberId:
+    Type: String
+    Default: ""
+  WhatsAppApiVersion:
+    Type: String
+    Default: v21.0
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [ERROR, WARN, INFO, DEBUG]
+
+Resources:
+  # ─── Balanceador interno (solo CloudFront llega a él) ───────────────
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: saas-alb
+      Type: application
+      Scheme: internal
+      Subnets: !Split [",", !ImportValue {"Fn::Sub": "${BaseStack}-PrivateSubnets"}]
+      SecurityGroups: [!ImportValue {"Fn::Sub": "${BaseStack}-AlbSecurityGroup"}]
+      LoadBalancerAttributes:
+        - { Key: idle_timeout.timeout_seconds, Value: "120" }
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "404", ContentType: application/json, MessageBody: '{"error":"no encontrado"}' }
+
+  BloquearActuator:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 1
+      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: ["/api-*/actuator/*"] } }]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "404", ContentType: application/json, MessageBody: '{"error":"no encontrado"}' }
+
+  UserTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-user
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8082
+      VpcId: !ImportValue {"Fn::Sub": "${BaseStack}-VpcId"}
+      HealthCheckPath: /api-usuarios/actuator/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  UserRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 10
+      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: ["/api-usuarios/*"] } }]
+      Actions: [{ Type: forward, TargetGroupArn: !Ref UserTargetGroup }]
+
+  CatalogTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-catalog
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8083
+      VpcId: !ImportValue {"Fn::Sub": "${BaseStack}-VpcId"}
+      HealthCheckPath: /api-catalogo/actuator/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  CatalogRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 20
+      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: ["/api-catalogo/*"] } }]
+      Actions: [{ Type: forward, TargetGroupArn: !Ref CatalogTargetGroup }]
+
+  SubscriptionTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-subs
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8084
+      VpcId: !ImportValue {"Fn::Sub": "${BaseStack}-VpcId"}
+      HealthCheckPath: /api-suscripciones/actuator/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  SubscriptionRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 30
+      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: ["/api-suscripciones/*"] } }]
+      Actions: [{ Type: forward, TargetGroupArn: !Ref SubscriptionTargetGroup }]
+
+  # ─── CloudFront: frontend (S3) + APIs (origen VPC hacia el balanceador) ──
+  VpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: saas-alb-interno
+        Arn: !Ref Alb
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
+  SpaRewrite:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: saas-spa-rewrite
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rutas de la SPA a index.html; archivos con extension pasan tal cual
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var req = event.request;
+          var ultimo = req.uri.split('/').pop();
+          if (ultimo.indexOf('.') === -1) {
+            req.uri = '/index.html';
+          }
+          return req;
+        }
+
+  FrontendOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: saas-frontend-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: SaaS Platform
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_All
+        ViewerCertificate: { CloudFrontDefaultCertificate: true }
+        Origins:
+          - Id: frontend
+            DomainName: !ImportValue {"Fn::Sub": "${BaseStack}-FrontendBucketDomain"}
+            OriginAccessControlId: !GetAtt FrontendOac.Id
+            S3OriginConfig: { OriginAccessIdentity: "" }
+          - Id: apis
+            DomainName: !GetAtt Alb.DNSName
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt VpcOrigin.Id
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: frontend
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6      # CachingOptimized
+          Compress: true
+          AllowedMethods: [GET, HEAD]
+          FunctionAssociations:
+            - { EventType: viewer-request, FunctionARN: !GetAtt SpaRewrite.FunctionARN }
+        # Sin "Custom error responses": convertirían los 403/404 de las APIs en index.html
+        CacheBehaviors:
+          - PathPattern: "/api-usuarios/*"
+            TargetOriginId: apis
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad         # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # AllViewerExceptHostHeader (lleva Authorization)
+            Compress: true
+          - PathPattern: "/api-catalogo/*"
+            TargetOriginId: apis
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad         # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # AllViewerExceptHostHeader (lleva Authorization)
+            Compress: true
+          - PathPattern: "/api-suscripciones/*"
+            TargetOriginId: apis
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad         # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # AllViewerExceptHostHeader (lleva Authorization)
+            Compress: true
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !ImportValue {"Fn::Sub": "${BaseStack}-FrontendBucketName"}
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SoloCloudFront
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub
+              - arn:aws:s3:::${Bucket}/*
+              - Bucket: !ImportValue {"Fn::Sub": "${BaseStack}-FrontendBucketName"}
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ─── RabbitMQ (rabbitmq.saas.local) ──────────────────────────────────
+  RabbitDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: rabbitmq
+      NamespaceId: !ImportValue {"Fn::Sub": "${BaseStack}-NamespaceId"}
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{ Type: A, TTL: 10 }]
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
+
+  RabbitTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: saas-rabbitmq
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "1024"
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !ImportValue {"Fn::Sub": "${BaseStack}-ExecutionRoleArn"}
+      ContainerDefinitions:
+        - Name: rabbitmq
+          Image: public.ecr.aws/docker/library/rabbitmq:4-management
+          Essential: true
+          PortMappings: [{ ContainerPort: 5672 }, { ContainerPort: 15672 }]
+          Environment: [{ Name: RABBITMQ_DEFAULT_USER, Value: saas }]
+          Secrets:
+            - { Name: RABBITMQ_DEFAULT_PASS, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/RABBITMQ_PASSWORD" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !ImportValue {"Fn::Sub": "${BaseStack}-LogGroupName"}
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: rabbitmq
+
+  RabbitService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: rabbitmq
+      Cluster: !ImportValue {"Fn::Sub": "${BaseStack}-ClusterName"}
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref RabbitTaskDefinition
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }   # un solo broker
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Split [",", !ImportValue {"Fn::Sub": "${BaseStack}-PublicSubnets"}]
+          SecurityGroups: [!ImportValue {"Fn::Sub": "${BaseStack}-RabbitSecurityGroup"}]
+      ServiceRegistries: [{ RegistryArn: !GetAtt RabbitDiscovery.Arn }]
+
+  # ─── Servicios ───────────────────────────────────────────────────────
+  UserTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: saas-user-service
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !ImportValue {"Fn::Sub": "${BaseStack}-ExecutionRoleArn"}
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/saas/user-service:${UserImageTag}"
+          Essential: true
+          PortMappings: [{ ContainerPort: 8082 }]
+          Environment:
+            - { Name: SERVER_PORT, Value: "8082" }
+            - { Name: SERVER_SERVLET_CONTEXT_PATH, Value: /api-usuarios }
+            - { Name: DB_HOST, Value: !ImportValue {"Fn::Sub": "${BaseStack}-DbHost"} }
+            - { Name: DB_PORT, Value: "5432" }
+            - { Name: DB_NAME, Value: saas_platform }
+            - { Name: DB_USER, Value: saas_app }
+            - { Name: APP_URL, Value: !Sub "https://${Distribution.DomainName}" }
+            - { Name: CORS_ORIGINS, Value: !Sub "https://${Distribution.DomainName}" }
+            - { Name: MAIL_FROM, Value: !Ref MailFrom }
+            - { Name: MAIL_FROM_NAME, Value: !Ref MailFromName }
+            - { Name: APP_MAIL_BRAND_NAME, Value: !Ref BrandName }
+            - { Name: APP_LOG_LEVEL, Value: !Ref LogLevel }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/DB_PASSWORD" }
+            - { Name: JWT_SECRET, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/JWT_SECRET" }
+            - { Name: SENDGRID_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/SENDGRID_API_KEY" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !ImportValue {"Fn::Sub": "${BaseStack}-LogGroupName"}
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: user-service
+  UserService:
+    Type: AWS::ECS::Service
+    DependsOn: [UserRule]
+    Properties:
+      ServiceName: user-service
+      Cluster: !ImportValue {"Fn::Sub": "${BaseStack}-ClusterName"}
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref UserTaskDefinition
+      PropagateTags: SERVICE
+      EnableECSManagedTags: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED          # salida a SendGrid, WhatsApp y ECR sin NAT
+          Subnets: !Split [",", !ImportValue {"Fn::Sub": "${BaseStack}-PublicSubnets"}]
+          SecurityGroups: [!ImportValue {"Fn::Sub": "${BaseStack}-AppsSecurityGroup"}]
+      HealthCheckGracePeriodSeconds: 180
+      LoadBalancers:
+        - { ContainerName: app, ContainerPort: 8082, TargetGroupArn: !Ref UserTargetGroup }
+
+  CatalogTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: saas-catalog-service
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !ImportValue {"Fn::Sub": "${BaseStack}-ExecutionRoleArn"}
+      Volumes:
+        - Name: uploads
+          EFSVolumeConfiguration:
+            FilesystemId: !ImportValue {"Fn::Sub": "${BaseStack}-UploadsFileSystemId"}
+            TransitEncryption: ENABLED
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/saas/catalog-service:${CatalogImageTag}"
+          Essential: true
+          PortMappings: [{ ContainerPort: 8083 }]
+          MountPoints: [{ SourceVolume: uploads, ContainerPath: /data/uploads }]
+          Environment:
+            - { Name: SERVER_PORT, Value: "8083" }
+            - { Name: SERVER_SERVLET_CONTEXT_PATH, Value: /api-catalogo }
+            - { Name: DB_HOST, Value: !ImportValue {"Fn::Sub": "${BaseStack}-DbHost"} }
+            - { Name: DB_PORT, Value: "5432" }
+            - { Name: DB_NAME, Value: saas_platform }
+            - { Name: DB_USER, Value: saas_app }
+            - { Name: RABBITMQ_HOST, Value: rabbitmq.saas.local }
+            - { Name: RABBITMQ_PORT, Value: "5672" }
+            - { Name: RABBITMQ_USER, Value: saas }
+            - { Name: PUBLIC_BASE_URL, Value: !Sub "https://${Distribution.DomainName}/catalog" }
+            - { Name: UPLOADS_DIR, Value: /data/uploads }
+            - { Name: CORS_ORIGINS, Value: !Sub "https://${Distribution.DomainName}" }
+            - { Name: MAIL_FROM, Value: !Ref MailFrom }
+            - { Name: MAIL_FROM_NAME, Value: !Ref MailFromName }
+            - { Name: WHATSAPP_PHONE_NUMBER_ID, Value: !Ref WhatsAppPhoneNumberId }
+            - { Name: WHATSAPP_API_VERSION, Value: !Ref WhatsAppApiVersion }
+            - { Name: LOG_LEVEL, Value: !Ref LogLevel }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/DB_PASSWORD" }
+            - { Name: JWT_SECRET, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/JWT_SECRET" }
+            - { Name: RABBITMQ_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/RABBITMQ_PASSWORD" }
+            - { Name: SENDGRID_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/SENDGRID_API_KEY" }
+            - { Name: WHATSAPP_ACCESS_TOKEN, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/WHATSAPP_ACCESS_TOKEN" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !ImportValue {"Fn::Sub": "${BaseStack}-LogGroupName"}
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: catalog-service
+  CatalogService:
+    Type: AWS::ECS::Service
+    DependsOn: [CatalogRule, RabbitService]
+    Properties:
+      ServiceName: catalog-service
+      Cluster: !ImportValue {"Fn::Sub": "${BaseStack}-ClusterName"}
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref CatalogTaskDefinition
+      PropagateTags: SERVICE
+      EnableECSManagedTags: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED          # salida a SendGrid, WhatsApp y ECR sin NAT
+          Subnets: !Split [",", !ImportValue {"Fn::Sub": "${BaseStack}-PublicSubnets"}]
+          SecurityGroups: [!ImportValue {"Fn::Sub": "${BaseStack}-AppsSecurityGroup"}]
+      HealthCheckGracePeriodSeconds: 180
+      LoadBalancers:
+        - { ContainerName: app, ContainerPort: 8083, TargetGroupArn: !Ref CatalogTargetGroup }
+
+  SubscriptionTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: saas-subscription-service
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !ImportValue {"Fn::Sub": "${BaseStack}-ExecutionRoleArn"}
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/saas/subscription-service:${SubscriptionImageTag}"
+          Essential: true
+          PortMappings: [{ ContainerPort: 8084 }]
+          Environment:
+            - { Name: SERVER_PORT, Value: "8084" }
+            - { Name: SERVER_SERVLET_CONTEXT_PATH, Value: /api-suscripciones }
+            - { Name: DB_HOST, Value: !ImportValue {"Fn::Sub": "${BaseStack}-DbHost"} }
+            - { Name: DB_PORT, Value: "5432" }
+            - { Name: DB_NAME, Value: saas_platform }
+            - { Name: DB_USER, Value: saas_app }
+            - { Name: APP_URL, Value: !Sub "https://${Distribution.DomainName}" }
+            - { Name: CORS_ORIGINS, Value: !Sub "https://${Distribution.DomainName}" }
+            - { Name: RABBITMQ_HOST, Value: rabbitmq.saas.local }
+            - { Name: RABBITMQ_PORT, Value: "5672" }
+            - { Name: RABBITMQ_USER, Value: saas }
+            - { Name: SUSCRIPCIONES_ZONA, Value: America/Bogota }
+            - { Name: LOG_LEVEL, Value: !Ref LogLevel }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/DB_PASSWORD" }
+            - { Name: JWT_SECRET, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/JWT_SECRET" }
+            - { Name: RABBITMQ_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/RABBITMQ_PASSWORD" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !ImportValue {"Fn::Sub": "${BaseStack}-LogGroupName"}
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: subscription-service
+  SubscriptionService:
+    Type: AWS::ECS::Service
+    DependsOn: [SubscriptionRule, RabbitService]
+    Properties:
+      ServiceName: subscription-service
+      Cluster: !ImportValue {"Fn::Sub": "${BaseStack}-ClusterName"}
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref SubscriptionTaskDefinition
+      PropagateTags: SERVICE
+      EnableECSManagedTags: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED          # salida a SendGrid, WhatsApp y ECR sin NAT
+          Subnets: !Split [",", !ImportValue {"Fn::Sub": "${BaseStack}-PublicSubnets"}]
+          SecurityGroups: [!ImportValue {"Fn::Sub": "${BaseStack}-AppsSecurityGroup"}]
+      HealthCheckGracePeriodSeconds: 180
+      LoadBalancers:
+        - { ContainerName: app, ContainerPort: 8084, TargetGroupArn: !Ref SubscriptionTargetGroup }
+
+  NotificationTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: saas-notification-service
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "1024"
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !ImportValue {"Fn::Sub": "${BaseStack}-ExecutionRoleArn"}
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/saas/notification-service:${NotificationImageTag}"
+          Essential: true
+          PortMappings: [{ ContainerPort: 8085 }]
+          Environment:
+            - { Name: RABBITMQ_HOST, Value: rabbitmq.saas.local }
+            - { Name: RABBITMQ_PORT, Value: "5672" }
+            - { Name: RABBITMQ_USER, Value: saas }
+            - { Name: USER_SERVICE_URL, Value: !Sub "https://${Distribution.DomainName}/api-usuarios" }
+            - { Name: MAIL_FROM, Value: !Ref MailFrom }
+            - { Name: MAIL_FROM_NAME, Value: !Ref MailFromName }
+            - { Name: APP_MAIL_BRAND_NAME, Value: !Ref BrandName }
+            - { Name: WHATSAPP_PHONE_NUMBER_ID, Value: !Ref WhatsAppPhoneNumberId }
+            - { Name: WHATSAPP_API_VERSION, Value: !Ref WhatsAppApiVersion }
+          Secrets:
+            - { Name: RABBITMQ_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/RABBITMQ_PASSWORD" }
+            - { Name: SENDGRID_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/SENDGRID_API_KEY" }
+            - { Name: WHATSAPP_ACCESS_TOKEN, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/WHATSAPP_ACCESS_TOKEN" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !ImportValue {"Fn::Sub": "${BaseStack}-LogGroupName"}
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: notification-service
+  NotificationService:
+    Type: AWS::ECS::Service
+    DependsOn: [RabbitService]
+    Properties:
+      ServiceName: notification-service
+      Cluster: !ImportValue {"Fn::Sub": "${BaseStack}-ClusterName"}
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref NotificationTaskDefinition
+      PropagateTags: SERVICE
+      EnableECSManagedTags: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED          # salida a SendGrid, WhatsApp y ECR sin NAT
+          Subnets: !Split [",", !ImportValue {"Fn::Sub": "${BaseStack}-PublicSubnets"}]
+          SecurityGroups: [!ImportValue {"Fn::Sub": "${BaseStack}-AppsSecurityGroup"}]
+
+Outputs:
+  Url:
+    Description: Dirección pública de la plataforma
+    Value: !Sub https://${Distribution.DomainName}
+  CloudFrontDomain:
+    Value: !GetAtt Distribution.DomainName
+  DistributionId:
+    Value: !Ref Distribution

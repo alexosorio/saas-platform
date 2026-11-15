@@ -1,0 +1,421 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  SaaS Platform - base: red, grupos de seguridad, ECR, PostgreSQL (RDS), disco EFS,
+  cluster ECS, Cloud Map, logs, bucket del frontend y la tarea del migrador.
+  Los recursos con datos (RDS, EFS, ECR, bucket) se conservan si se borra el stack.
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  DbEngineVersion:
+    Type: String
+    Default: "16.15"
+    Description: Versión de PostgreSQL (las menores se actualizan solas)
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+  DbBackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+    Description: Días de copias automáticas de RDS (si tu plan gratuito lo limita, usa 1)
+  MigratorImageTag:
+    Type: String
+    Default: latest
+  SuperadminEmail:
+    Type: String
+    Default: ""
+    Description: >-
+      Correo del superadministrador que el migrador crea la primera vez (vacío = no crear).
+      Requiere el parámetro /saas/prod/SUPERADMIN_PASSWORD.
+  SuperadminNombre:
+    Type: String
+    Default: Super
+  SuperadminApellido:
+    Type: String
+    Default: Administrador
+
+Conditions:
+  ConSuperadmin: !Not [!Equals [!Ref SuperadminEmail, ""]]
+
+Resources:
+  # ─── Red ─────────────────────────────────────────────────────────────
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: saas-vpc }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: saas-igw }]
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]
+      Tags: [{ Key: Name, Value: saas-public-a }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]
+      Tags: [{ Key: Name, Value: saas-public-b }]
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 12]]
+      Tags: [{ Key: Name, Value: saas-private-a }]
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 12]]
+      Tags: [{ Key: Name, Value: saas-private-b }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: saas-public }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRouteTable }
+
+  PublicSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRouteTable }
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: saas-private }]
+
+  PrivateSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnetA, RouteTableId: !Ref PrivateRouteTable }
+
+  PrivateSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnetB, RouteTableId: !Ref PrivateRouteTable }
+
+  # S3 sin pasar por internet (gratis)
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref PublicRouteTable, !Ref PrivateRouteTable]
+
+  # ─── Grupos de seguridad ─────────────────────────────────────────────
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: saas-alb
+      GroupDescription: Balanceador interno - solo trafico de dentro de la VPC (origen VPC de CloudFront)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: Origen VPC de CloudFront }
+      Tags: [{ Key: Name, Value: saas-alb }]
+
+  AppsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: saas-apps
+      GroupDescription: Servicios de la plataforma - solo desde el balanceador
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8082, ToPort: 8085, SourceSecurityGroupId: !Ref AlbSecurityGroup, Description: Desde el balanceador }
+      Tags: [{ Key: Name, Value: saas-apps }]
+
+  RabbitSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: saas-rabbit
+      GroupDescription: RabbitMQ - solo desde los servicios
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5672, ToPort: 5672, SourceSecurityGroupId: !Ref AppsSecurityGroup, Description: AMQP desde los servicios }
+      Tags: [{ Key: Name, Value: saas-rabbit }]
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: saas-rds
+      GroupDescription: PostgreSQL - solo desde los servicios y el migrador
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref AppsSecurityGroup, Description: Desde los servicios }
+      Tags: [{ Key: Name, Value: saas-rds }]
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: saas-efs
+      GroupDescription: EFS - solo desde los servicios
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 2049, ToPort: 2049, SourceSecurityGroupId: !Ref AppsSecurityGroup, Description: NFS desde los servicios }
+      Tags: [{ Key: Name, Value: saas-efs }]
+
+  # ─── Imágenes (ECR) ──────────────────────────────────────────────────
+  EcrUserService:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: saas/user-service
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Conserva las 30 imagenes mas recientes","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}}]}'
+
+  EcrCatalogService:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: saas/catalog-service
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Conserva las 30 imagenes mas recientes","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}}]}'
+
+  EcrSubscriptionService:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: saas/subscription-service
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Conserva las 30 imagenes mas recientes","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}}]}'
+
+  EcrNotificationService:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: saas/notification-service
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Conserva las 30 imagenes mas recientes","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}}]}'
+
+  EcrDbMigrator:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: saas/db-migrator
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Conserva las 30 imagenes mas recientes","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}}]}'
+
+  # ─── Logs, rol de ejecución, cluster y Cloud Map ─────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/saas-prod
+      RetentionInDays: 30
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: saas-ecs-execution
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: leer-secretos-saas
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/*
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: saas-prod
+      CapacityProviders: [FARGATE]
+      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+
+  Namespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: saas.local
+      Vpc: !Ref Vpc
+      Description: Nombres internos (rabbitmq.saas.local)
+
+  # ─── PostgreSQL ──────────────────────────────────────────────────────
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: saas-db
+      DBSubnetGroupDescription: Subredes privadas para PostgreSQL
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: saas-db
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: saas_platform
+      MasterUsername: saas_admin
+      ManageMasterUserPassword: true          # la contraseña maestra la guarda y rota AWS (Secrets Manager)
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: !Ref DbBackupRetentionDays
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: true
+      CopyTagsToSnapshot: true
+
+  # ─── Disco de imágenes de productos ──────────────────────────────────
+  UploadsFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      LifecyclePolicies: [{ TransitionToIA: AFTER_30_DAYS }]
+      FileSystemTags: [{ Key: Name, Value: saas-uploads }]
+
+  UploadsMountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref UploadsFileSystem
+      SubnetId: !Ref PrivateSubnetA
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  UploadsMountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref UploadsFileSystem
+      SubnetId: !Ref PrivateSubnetB
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  # ─── Bucket del frontend (privado: solo CloudFront lo lee) ──────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub saas-frontend-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  # ─── Migrador (tarea única que el pipeline lanza antes de desplegar) ─
+  MigratorTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: saas-db-migrator
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: migrador
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/saas/db-migrator:${MigratorImageTag}
+          Essential: true
+          Environment:
+            - { Name: PGHOST, Value: !GetAtt Database.Endpoint.Address }
+            - { Name: PGPORT, Value: !GetAtt Database.Endpoint.Port }
+            - { Name: PGDATABASE, Value: saas_platform }
+            - { Name: PGSSLMODE, Value: require }
+            - !If [ConSuperadmin, { Name: SUPERADMIN_EMAIL, Value: !Ref SuperadminEmail }, !Ref AWS::NoValue]
+            - !If [ConSuperadmin, { Name: SUPERADMIN_NOMBRE, Value: !Ref SuperadminNombre }, !Ref AWS::NoValue]
+            - !If [ConSuperadmin, { Name: SUPERADMIN_APELLIDO, Value: !Ref SuperadminApellido }, !Ref AWS::NoValue]
+          Secrets:
+            - { Name: PGUSER, ValueFrom: !Sub "${Database.MasterUserSecret.SecretArn}:username::" }
+            - { Name: PGPASSWORD, ValueFrom: !Sub "${Database.MasterUserSecret.SecretArn}:password::" }
+            - { Name: DB_APP_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/DB_PASSWORD" }
+            - !If
+              - ConSuperadmin
+              - { Name: SUPERADMIN_PASSWORD, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/saas/prod/SUPERADMIN_PASSWORD" }
+              - !Ref AWS::NoValue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: db-migrator
+
+Outputs:
+  VpcId:              { Value: !Ref Vpc, Export: { Name: !Sub "${AWS::StackName}-VpcId" } }
+  VpcCidr:            { Value: !Ref VpcCidr, Export: { Name: !Sub "${AWS::StackName}-VpcCidr" } }
+  PublicSubnets:      { Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]], Export: { Name: !Sub "${AWS::StackName}-PublicSubnets" } }
+  PrivateSubnets:     { Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]], Export: { Name: !Sub "${AWS::StackName}-PrivateSubnets" } }
+  AlbSecurityGroup:   { Value: !Ref AlbSecurityGroup, Export: { Name: !Sub "${AWS::StackName}-AlbSecurityGroup" } }
+  AppsSecurityGroup:  { Value: !Ref AppsSecurityGroup, Export: { Name: !Sub "${AWS::StackName}-AppsSecurityGroup" } }
+  RabbitSecurityGroup: { Value: !Ref RabbitSecurityGroup, Export: { Name: !Sub "${AWS::StackName}-RabbitSecurityGroup" } }
+  ClusterName:        { Value: !Ref Cluster, Export: { Name: !Sub "${AWS::StackName}-ClusterName" } }
+  NamespaceId:        { Value: !GetAtt Namespace.Id, Export: { Name: !Sub "${AWS::StackName}-NamespaceId" } }
+  ExecutionRoleArn:   { Value: !GetAtt ExecutionRole.Arn, Export: { Name: !Sub "${AWS::StackName}-ExecutionRoleArn" } }
+  LogGroupName:       { Value: !Ref LogGroup, Export: { Name: !Sub "${AWS::StackName}-LogGroupName" } }
+  DbHost:             { Value: !GetAtt Database.Endpoint.Address, Export: { Name: !Sub "${AWS::StackName}-DbHost" } }
+  UploadsFileSystemId: { Value: !Ref UploadsFileSystem, Export: { Name: !Sub "${AWS::StackName}-UploadsFileSystemId" } }
+  FrontendBucketName: { Value: !Ref FrontendBucket, Export: { Name: !Sub "${AWS::StackName}-FrontendBucketName" } }
+  FrontendBucketDomain: { Value: !GetAtt FrontendBucket.RegionalDomainName, Export: { Name: !Sub "${AWS::StackName}-FrontendBucketDomain" } }
+  MigratorTaskDefinition: { Value: !Ref MigratorTaskDefinition }

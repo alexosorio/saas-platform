@@ -1,0 +1,47 @@
+# Reutilizable: construye las imágenes de los servicios indicados y las sube a ECR con la etiqueta dada.
+name: Imágenes
+
+on:
+  workflow_call:
+    inputs:
+      servicios:
+        description: 'Lista JSON, p. ej. ["user-service","catalog-service"]'
+        type: string
+        required: true
+      tag:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  imagen:
+    name: Imagen ${{ matrix.servicio }}
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        servicio: ${{ fromJSON(inputs.servicios) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.backend
+          build-args: SERVICE=${{ matrix.servicio }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/saas/${{ matrix.servicio }}:${{ inputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.servicio }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.servicio }}

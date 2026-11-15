@@ -14,7 +14,9 @@ Plataforma multi-tenant para venta de celulares: 4 microservicios Spring Boot (J
 | `frontend/` | Workspace npm: `ui-shell` + apps `security` (host), `catalog` y `subscription` |
 | `database/schema.sql` | Esquema completo consolidado (V2…V25). `database/migrations/` guarda el historial |
 | `deploy/docker/Dockerfile.backend` | Una sola imagen para los 4 servicios (`--build-arg SERVICE=...`) |
-| `deploy/aws/` | Scripts de AWS: task definitions sin dominio, despliegue manual, conexión con GitHub (OIDC) |
+| `database/migrar.sh`, `database/Dockerfile` | Migrador: carga `schema.sql` en una base vacía y aplica V26+ en orden |
+| `infra/` | CloudFormation: bootstrap (OIDC), `saas-base` y `saas-app`, parámetros y scripts de despliegue |
+| `deploy/aws/` | Despliegue manual de imágenes (`build-push.sh`) y del frontend (`deploy-frontend.sh`) |
 | `.github/workflows/` | Pipelines de GitHub Actions |
 
 ## Desarrollo local
@@ -32,37 +34,16 @@ Sin Docker: instala primero las librerías (`for d in libs/*/; do mvn -f "$d/pom
 
 | Workflow | Cuándo corre | Qué hace |
 | --- | --- | --- |
-| **Backend** | PR o push a `main` que toque `libs/`, `services/` o el Dockerfile; o manual | PR: compila. `main`: compila, sube la imagen a ECR (`saas/<servicio>:<commit>`) y despliega en ECS esperando a que quede estable. Solo los servicios que cambiaron; un cambio en `libs/` despliega los 4 |
+| **Infraestructura** | PR o push a `main` que toque `infra/` o `database/`; o manual | PR: valida las plantillas. `main`: aplica `saas-base`, migra la base y aplica `saas-app` (la primera vez crea toda la plataforma) |
+| **Backend** | PR o push a `main` que toque `libs/`, `services/` o el Dockerfile; o manual | PR: compila. `main`: compila, sube la imagen a ECR (`saas/<servicio>:<commit>`) y cambia su etiqueta en `saas-app`. Solo los servicios que cambiaron; un cambio en `libs/` despliega los 4 |
 | **Frontend** | PR o push a `main` que toque `frontend/`; o manual | PR: compila. `main`: compila, sube a S3 e invalida CloudFront |
 
-Para desplegar a mano: pestaña **Actions → Backend → Run workflow** y elige el servicio (o `todos`).
+Los pipelines no guardan claves de AWS: GitHub pide credenciales temporales por OIDC al rol `saas-github-deploy`. Mientras la variable `AWS_ROLE_ARN` no exista en GitHub, solo compilan y validan.
 
-Los pipelines no guardan claves de AWS: GitHub pide credenciales temporales por OIDC al rol `github-actions-deploy`, que solo puede subir imágenes `saas/*`, actualizar servicios del cluster `saas-prod`, escribir en el bucket del frontend e invalidar su distribución. Mientras la variable `AWS_ROLE_ARN` no exista, los pipelines solo compilan.
+Toda la infraestructura está en `infra/` como plantillas de CloudFormation. Cómo crearla la primera vez y cómo cambiarla después: [infra/README.md](infra/README.md).
 
-### Conectar con AWS (una vez)
+## Cambios de configuración
 
-Requisito: la infraestructura de la guía de despliegue ya creada (cluster `saas-prod`, los 4 servicios en ECS con su task definition, repos de ECR, bucket y CloudFront). El pipeline toma la task definition activa de cada servicio y solo cambia la imagen, así que las variables y secretos se siguen administrando con `deploy/aws/sin-dominio/registrar-taskdefs.sh`.
-
-1. Con tu usuario administrador de AWS:
-
-   ```bash
-   ./deploy/aws/github-oidc.sh <tu-usuario>/saas-platform <bucket-del-frontend> <id-distribución-cloudfront>
-   ```
-
-2. El script imprime 5 variables. Créalas en **Settings → Secrets and variables → Actions → Variables** (o con los comandos `gh variable set` que imprime):
-
-   | Variable | Ejemplo |
-   | --- | --- |
-   | `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/github-actions-deploy` |
-   | `AWS_REGION` | `us-east-2` |
-   | `ECS_CLUSTER` | `saas-prod` |
-   | `FRONTEND_BUCKET` | `saas-frontend-123456789012` |
-   | `CLOUDFRONT_DISTRIBUTION_ID` | `E1ABCDEF2GHIJK` |
-
-3. (Recomendado) En **Settings → Environments → production**, agrega *Required reviewers*: cada despliegue esperará tu aprobación. Y en **Settings → Branches**, protege `main` para que los cambios entren por pull request.
-4. Prueba: **Actions → Backend → Run workflow → todos**.
-
-### Cambios de configuración
-
-- **Variables de entorno o secretos de un servicio:** edita `deploy/aws/sin-dominio/config.env` o Parameter Store, corre `registrar-taskdefs.sh` y luego **Run workflow** para ese servicio (o *Force new deployment* en ECS).
-- **Base de datos:** las migraciones no se aplican solas. Agrega `database/migrations/V26__...sql`, ejecútala en RDS y súmala a `schema.sql`.
+- **Variables de los servicios** (remitente, marca, WhatsApp): `infra/parametros/app.json` y push.
+- **Secretos:** Parameter Store (`/saas/prod/*`); luego Actions → Backend → Run workflow para que las tareas los vuelvan a leer.
+- **Base de datos:** agrega `database/migrations/V26__descripcion.sql`; el pipeline la aplica una sola vez.

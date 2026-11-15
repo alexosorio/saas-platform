@@ -14,13 +14,10 @@ on:
       - "frontend/**"
       - ".github/workflows/frontend.yml"
   workflow_dispatch:
+  workflow_call:            # el pipeline Infraestructura lo llama al crear la plataforma por primera vez
 
 permissions:
   contents: read
-
-concurrency:
-  group: frontend-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   compilar:
@@ -81,7 +78,14 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
       - name: Subir e invalidar caché
         env:
-          BUCKET: ${{ vars.FRONTEND_BUCKET }}
-          DIST_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
           SKIP_BUILD: "1"
-        run: ./deploy/aws/deploy-frontend.sh
+        run: |
+          salida() { aws cloudformation describe-stacks --stack-name "$1" \
+            --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text 2>/dev/null || true; }
+          BUCKET=$(salida saas-base FrontendBucketName)
+          DIST_ID=$(salida saas-app DistributionId)
+          if [ -z "$BUCKET" ] || [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "::notice::La infraestructura aún no existe: el pipeline Infraestructura publica el frontend al crearla."
+            exit 0
+          fi
+          BUCKET="$BUCKET" DIST_ID="$DIST_ID" ./deploy/aws/deploy-frontend.sh

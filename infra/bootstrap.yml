@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  SaaS Platform - conexión de GitHub Actions con AWS (se despliega UNA vez, a mano).
+  Crea el proveedor OIDC de GitHub, el rol que usan los pipelines y el rol con el que
+  CloudFormation crea la infraestructura.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: alexosorio/saas-platform
+    AllowedPattern: "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+    Description: Repositorio dueño/nombre que puede desplegar
+  CrearProveedorOidc:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: false si la cuenta ya tiene el proveedor token.actions.githubusercontent.com
+
+Conditions:
+  CrearOidc: !Equals [!Ref CrearProveedorOidc, "true"]
+
+Resources:
+  GitHubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CrearOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # Rol con el que CloudFormation crea y actualiza los stacks saas-base y saas-app
+  CloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: saas-cloudformation
+      Description: CloudFormation crea la infraestructura de saas-platform con este rol
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: roles-saas
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AdministrarRolesSaas
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/saas-*
+
+  # Rol que asumen los pipelines de GitHub (sin claves guardadas)
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: saas-github-deploy
+      Description: !Sub Despliegues de GitHub Actions desde ${GitHubRepo}
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubRepo}:environment:production
+                  - !Sub repo:${GitHubRepo}:ref:refs/heads/main
+      Policies:
+        - PolicyName: despliegue-saas
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StacksSaas
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/saas-*/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/*
+              - Sid: LecturaCloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStacks
+                Resource: "*"
+              - Sid: UsarRolDeCloudFormation
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CloudFormationRole.Arn
+                Condition:
+                  StringEquals: { iam:PassedToService: cloudformation.amazonaws.com }
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:DescribeImages
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/saas/*
+              - Sid: Migrador
+                Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/saas-db-migrator:*
+              - Sid: VerTareas
+                Effect: Allow
+                Action: [ecs:DescribeTasks, ecs:DescribeServices]
+                Resource: "*"
+              - Sid: PasarRolDeTareas
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/saas-*
+                Condition:
+                  StringEquals: { iam:PassedToService: ecs-tasks.amazonaws.com }
+              - Sid: LogsDeTareas
+                Effect: Allow
+                Action: [logs:GetLogEvents, logs:FilterLogEvents]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/saas-prod:*
+              - Sid: ComprobarSecretos
+                Effect: Allow
+                Action: ssm:DescribeParameters
+                Resource: "*"
+              - Sid: FrontendListar
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: arn:aws:s3:::saas-frontend-*
+              - Sid: FrontendArchivos
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: arn:aws:s3:::saas-frontend-*/*
+              - Sid: InvalidarCache
+                Effect: Allow
+                Action: [cloudfront:CreateInvalidation, cloudfront:GetInvalidation]
+                Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+
+Outputs:
+  GitHubDeployRoleArn:
+    Description: Valor de la variable AWS_ROLE_ARN en GitHub
+    Value: !GetAtt GitHubDeployRole.Arn
+  CloudFormationRoleArn:
+    Description: Rol con el que CloudFormation crea la infraestructura
+    Value: !GetAtt CloudFormationRole.Arn
