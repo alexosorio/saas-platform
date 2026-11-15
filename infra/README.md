@@ -4,7 +4,7 @@ Toda la plataforma en AWS se crea y se actualiza desde estas plantillas. El pipe
 
 | Stack | Plantilla | Contenido | Cómo se despliega |
 | --- | --- | --- | --- |
-| `saas-bootstrap` | `bootstrap.yml` | Proveedor OIDC de GitHub, rol `saas-github-deploy` (pipelines) y rol `saas-cloudformation` (crea la infraestructura) | **A mano, una vez** |
+| `saas-bootstrap` | `bootstrap.yml` | Usuario `saas-github-ci` (o proveedor OIDC), rol `saas-github-deploy` (pipelines) y rol `saas-cloudformation` (crea la infraestructura) | **A mano, una vez** |
 | `saas-base` | `base.yml` | VPC, grupos de seguridad, ECR, PostgreSQL (RDS), EFS, cluster ECS, Cloud Map, logs, bucket del frontend, tarea del migrador | Pipeline |
 | `saas-app` | `app.yml` | Balanceador interno, RabbitMQ, los 4 servicios, CloudFront (frontend + APIs por origen VPC) | Pipeline |
 
@@ -32,23 +32,40 @@ Todo en la región de tu cuenta (`us-east-2` para cuentas nuevas desde Colombia)
 
 2. **Tus valores.** En `parametros/app.json` pon en `MailFrom` el remitente que verificaste en SendGrid. En `parametros/base.json` pon tu correo en `SuperadminEmail` para que el migrador cree el superadministrador (vacío = no lo crea). Haz commit, pero todavía sin conectar AWS.
 
-3. **Bootstrap** (desde la raíz del repo):
+3. **Bootstrap** (desde la raíz del repo, cada comando en una sola línea):
 
    ```bash
-   aws cloudformation deploy --stack-name saas-bootstrap --template-file infra/bootstrap.yml \
-     --capabilities CAPABILITY_NAMED_IAM --parameter-overrides GitHubRepo=alexosorio/saas-platform
-   aws cloudformation describe-stacks --stack-name saas-bootstrap \
-     --query "Stacks[0].Outputs[?OutputKey=='GitHubDeployRoleArn'].OutputValue" --output text
+   aws cloudformation describe-stacks --stack-name saas-bootstrap --query "Stacks[0].StackStatus" --output text
    ```
 
-   Si la cuenta ya tenía el proveedor OIDC de GitHub, agrega `CrearProveedorOidc=false`. Los IDs numéricos del dueño y del repo ya vienen por defecto (`GitHubOwnerId`, `GitHubRepoId`); GitHub los usa en los tokens de repos creados desde julio de 2026.
+   Si responde `ROLLBACK_COMPLETE` (un intento anterior falló), bórralo primero con `aws cloudformation delete-stack --stack-name saas-bootstrap` y espera a que desaparezca. Luego:
 
-4. **Variables en GitHub** (Settings → Secrets and variables → Actions → Variables):
+   ```bash
+   aws cloudformation deploy --stack-name saas-bootstrap --template-file infra/bootstrap.yml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides GitHubRepo=alexosorio/saas-platform
+   aws iam create-access-key --user-name saas-github-ci
+   ```
 
-   | Variable | Valor |
-   | --- | --- |
-   | `AWS_ROLE_ARN` | El ARN que imprimió el paso 3 (`arn:aws:iam::<cuenta>:role/saas-github-deploy`) |
-   | `AWS_REGION` | `us-east-2` |
+   El segundo comando imprime `AccessKeyId` y `SecretAccessKey`. La clave secreta solo se muestra esa vez.
+
+   **Por qué un usuario y no OIDC:** las cuentas creadas con el registro nuevo de AWS (`settings.aws.com`) tienen una política de la organización que bloquea `iam:*Provider*`, así que GitHub no puede registrarse como proveedor OIDC. El usuario `saas-github-ci` solo puede asumir el rol `saas-github-deploy`: su clave no da acceso a nada más, y cada ejecución trabaja con una sesión temporal del rol. Si algún día activas las funciones avanzadas de la cuenta, vuelve a desplegar con `ModoAcceso=oidc`, borra los dos secretos y el usuario deja de existir.
+
+4. **GitHub** (repo → Settings):
+
+   - *Environments → production → Environment secrets* (créalo si no existe; en *Deployment branches* limítalo a `main`):
+
+     | Secreto | Valor |
+     | --- | --- |
+     | `AWS_ACCESS_KEY_ID` | `AccessKeyId` del paso 3 |
+     | `AWS_SECRET_ACCESS_KEY` | `SecretAccessKey` del paso 3 |
+
+   - *Secrets and variables → Actions → Variables*:
+
+     | Variable | Valor |
+     | --- | --- |
+     | `AWS_ROLE_ARN` | `arn:aws:iam::<cuenta>:role/saas-github-deploy` |
+     | `AWS_REGION` | `us-east-2` |
+
+   Prueba la conexión con Actions → **Diagnóstico AWS** → Run workflow: debe mostrar `arn:aws:sts::<cuenta>:assumed-role/saas-github-deploy/...`.
 
 5. **Despliegue:** Actions → **Infraestructura** → Run workflow. La primera vez tarda unos 40 minutos (RDS ~10, CloudFront y el origen VPC ~20). El resumen del run muestra la dirección `https://dxxxx.cloudfront.net`.
 
@@ -74,6 +91,7 @@ Para revisar un cambio de infraestructura antes de aplicarlo, ábrelo como pull 
 
 - RDS tiene `DeletionProtection` y, si se reemplaza o borra, deja un snapshot.
 - ECR, EFS y el bucket se conservan si se borra `saas-base` (salvo que la creación inicial falle).
+- La clave de `saas-github-ci` solo sirve para asumir `saas-github-deploy`. Rótala cada pocos meses: crea una nueva, actualiza los secretos y borra la anterior (`aws iam delete-access-key`).
 - `saas-github-deploy` solo puede tocar stacks `saas-*`, subir imágenes `saas/*`, lanzar el migrador, escribir en el bucket `saas-frontend-*` e invalidar CloudFront. Los cambios de infraestructura los hace CloudFormation con `saas-cloudformation`.
 
 Para borrar todo: primero `saas-app`, luego quita la protección de RDS y borra `saas-base`. `saas-bootstrap` va al final.

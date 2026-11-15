@@ -38,7 +38,7 @@ Sin Docker: instala primero las librerías (`for d in libs/*/; do mvn -f "$d/pom
 | **Backend** | PR o push a `main` que toque `libs/`, `services/` o el Dockerfile; o manual | PR: compila. `main`: compila, sube la imagen a ECR (`saas/<servicio>:<commit>`) y cambia su etiqueta en `saas-app`. Solo los servicios que cambiaron; un cambio en `libs/` despliega los 4 |
 | **Frontend** | PR o push a `main` que toque `frontend/`; o manual | PR: compila. `main`: compila, sube a S3 e invalida CloudFront |
 
-Los pipelines no guardan claves de AWS: GitHub pide credenciales temporales por OIDC al rol `saas-github-deploy`. Mientras la variable `AWS_ROLE_ARN` no exista en GitHub, solo compilan y validan.
+Los pipelines trabajan con sesiones temporales del rol `saas-github-deploy`. Lo asumen con la clave del usuario `saas-github-ci` (secretos del environment `production`), que no tiene ningún otro permiso; en cuentas que lo permitan, pueden usar OIDC sin claves. Mientras la variable `AWS_ROLE_ARN` no exista en GitHub, solo compilan y validan.
 
 Toda la infraestructura está en `infra/` como plantillas de CloudFormation. Cómo crearla la primera vez y cómo cambiarla después: [infra/README.md](infra/README.md).
 

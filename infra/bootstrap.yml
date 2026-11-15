@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   SaaS Platform - conexión de GitHub Actions con AWS (se despliega UNA vez, a mano).
-  Crea el proveedor OIDC de GitHub, el rol que usan los pipelines y el rol con el que
-  CloudFormation crea la infraestructura.
+  Crea el rol que usan los pipelines, el rol con el que CloudFormation crea la infraestructura
+  y la identidad de GitHub: un usuario IAM que solo puede asumir ese rol (cuentas donde la
+  organización bloquea los proveedores OIDC) o el proveedor OIDC de GitHub.
 
 Parameters:
   GitHubRepo:
@@ -20,6 +21,13 @@ Parameters:
     Default: "1459014852"
     AllowedPattern: "[0-9]+"
     Description: ID numérico del repositorio (gh api repos/<dueño>/<repo> --jq .id)
+  ModoAcceso:
+    Type: String
+    Default: usuario
+    AllowedValues: [usuario, oidc]
+    Description: >-
+      usuario = usuario IAM saas-github-ci con clave en los secretos de GitHub (cuentas del registro
+      nuevo de AWS, que bloquean iam:*Provider*). oidc = sin claves, si la cuenta lo permite.
   CrearProveedorOidc:
     Type: String
     Default: "true"
@@ -27,7 +35,9 @@ Parameters:
     Description: false si la cuenta ya tiene el proveedor token.actions.githubusercontent.com
 
 Conditions:
-  CrearOidc: !Equals [!Ref CrearProveedorOidc, "true"]
+  UsarOidc: !Equals [!Ref ModoAcceso, oidc]
+  UsarUsuario: !Equals [!Ref ModoAcceso, usuario]
+  CrearOidc: !And [!Condition UsarOidc, !Equals [!Ref CrearProveedorOidc, "true"]]
 
 Resources:
   GitHubOidc:
@@ -39,6 +49,24 @@ Resources:
       ThumbprintList:
         - 6938fd4d98bab03faadb97b34396831e3780aea1
         - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # Usuario de GitHub Actions: su único permiso es asumir saas-github-deploy
+  GitHubCiUser:
+    Type: AWS::IAM::User
+    Condition: UsarUsuario
+    Properties:
+      UserName: saas-github-ci
+      Policies:
+        - PolicyName: solo-asumir-rol-de-despliegue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [sts:AssumeRole, sts:TagSession]
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/saas-github-deploy
+      Tags:
+        - { Key: Proyecto, Value: saas-platform }
+        - { Key: Uso, Value: GitHub Actions - clave en el environment production }
 
   # Rol con el que CloudFormation crea y actualiza los stacks saas-base y saas-app
   CloudFormationRole:
@@ -89,27 +117,36 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
-            Principal:
-              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
-            Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                # Repos creados desde julio de 2026 firman con IDs inmutables:
-                #   repo:<dueño>@<id>/<repo>@<id>:...   (se aceptan ambos formatos)
-                token.actions.githubusercontent.com:sub:
-                  - !Sub repo:${GitHubRepo}:environment:production
-                  - !Sub repo:${GitHubRepo}:ref:refs/heads/main
-                  - !Sub
-                    - "repo:${Duenio}@${GitHubOwnerId}/${Repo}@${GitHubRepoId}:environment:production"
-                    - Duenio: !Select [0, !Split ["/", !Ref GitHubRepo]]
-                      Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
-                  - !Sub
-                    - "repo:${Duenio}@${GitHubOwnerId}/${Repo}@${GitHubRepoId}:ref:refs/heads/main"
-                    - Duenio: !Select [0, !Split ["/", !Ref GitHubRepo]]
-                      Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
+          - !If
+            - UsarUsuario
+            - Effect: Allow
+              Principal: { AWS: !GetAtt GitHubCiUser.Arn }
+              Action: [sts:AssumeRole, sts:TagSession]
+            - !Ref AWS::NoValue
+          - !If
+            - UsarOidc
+            - Effect: Allow
+              Principal:
+                Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+              Action: sts:AssumeRoleWithWebIdentity
+              Condition:
+                StringEquals:
+                  token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                StringLike:
+                  # Repos creados desde julio de 2026 firman con IDs inmutables:
+                  #   repo:<dueño>@<id>/<repo>@<id>:...   (se aceptan ambos formatos)
+                  token.actions.githubusercontent.com:sub:
+                    - !Sub repo:${GitHubRepo}:environment:production
+                    - !Sub repo:${GitHubRepo}:ref:refs/heads/main
+                    - !Sub
+                      - "repo:${Duenio}@${GitHubOwnerId}/${Repo}@${GitHubRepoId}:environment:production"
+                      - Duenio: !Select [0, !Split ["/", !Ref GitHubRepo]]
+                        Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
+                    - !Sub
+                      - "repo:${Duenio}@${GitHubOwnerId}/${Repo}@${GitHubRepoId}:ref:refs/heads/main"
+                      - Duenio: !Select [0, !Split ["/", !Ref GitHubRepo]]
+                        Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
+            - !Ref AWS::NoValue
       Policies:
         - PolicyName: despliegue-saas
           PolicyDocument:
@@ -186,9 +223,10 @@ Resources:
                 Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
 
 Outputs:
-  ProveedorOidc:
-    Description: Proveedor OIDC de GitHub que valida los tokens
-    Value: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+  UsuarioCi:
+    Condition: UsarUsuario
+    Description: Crea su clave con aws iam create-access-key --user-name saas-github-ci
+    Value: !Ref GitHubCiUser
   GitHubDeployRoleArn:
     Description: Valor de la variable AWS_ROLE_ARN en GitHub
     Value: !GetAtt GitHubDeployRole.Arn

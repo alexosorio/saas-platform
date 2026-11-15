@@ -1,0 +1,27 @@
+# Diagnóstico de la conexión GitHub -> AWS (manual): asume el rol de despliegue como lo hacen
+# los pipelines y muestra con qué identidad quedó conectado.
+name: Diagnóstico AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  conexion:
+    name: Conexión con AWS
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Identidad
+        run: |
+          aws sts get-caller-identity --query Arn --output text
+          aws cloudformation describe-stacks --stack-name saas-bootstrap --query 'Stacks[0].StackStatus' --output text 2>&1 || true
