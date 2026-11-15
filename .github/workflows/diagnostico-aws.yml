@@ -30,3 +30,16 @@ jobs:
               --query 'StackEvents[?ends_with(ResourceStatus, `FAILED`) && ResourceStatusReason != `Resource creation cancelled`].[Timestamp, LogicalResourceId, ResourceStatus, ResourceStatusReason]' \
               --output text 2>/dev/null | head -10 || true
           done
+      - name: Prueba de la plataforma publicada
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name saas-app \
+            --query "Stacks[0].Outputs[?OutputKey=='Url'].OutputValue" --output text 2>/dev/null || true)
+          [ -n "$URL" ] && [ "$URL" != "None" ] || { echo "saas-app aún no existe"; exit 0; }
+          echo "Plataforma: $URL"
+          for p in / /catalog/products /api-usuarios/api/public/config /api-suscripciones/api/public/plans /api-catalogo/actuator/health; do
+            code=$(curl -s -o cuerpo.txt -w '%{http_code}' --max-time 30 "$URL$p")
+            printf '%-40s %s  %s\n' "$p" "$code" "$(head -c 120 cuerpo.txt | tr '\n' ' ')"
+          done
+          echo "Servicios ECS:"
+          aws ecs describe-services --cluster saas-prod --services user-service catalog-service subscription-service notification-service rabbitmq \
+            --query 'services[].[serviceName, runningCount, desiredCount, deployments[0].rolloutState]' --output text
