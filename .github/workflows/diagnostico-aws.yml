@@ -37,9 +37,14 @@ jobs:
           [ -n "$URL" ] && [ "$URL" != "None" ] || { echo "saas-app aún no existe"; exit 0; }
           echo "Plataforma: $URL"
           for p in / /catalog/products /api-usuarios/api/public/config /api-suscripciones/api/public/plans /api-catalogo/actuator/health; do
-            code=$(curl -s -o cuerpo.txt -w '%{http_code}' --max-time 30 "$URL$p")
+            code=$(curl -s -o cuerpo.txt -w '%{http_code}' --max-time 30 "$URL$p" || true)
             printf '%-40s %s  %s\n' "$p" "$code" "$(head -c 120 cuerpo.txt | tr '\n' ' ')"
           done
           echo "Servicios ECS:"
           aws ecs describe-services --cluster saas-prod --services user-service catalog-service subscription-service notification-service rabbitmq \
             --query 'services[].[serviceName, runningCount, desiredCount, deployments[0].rolloutState]' --output text
+          echo "Destinos del balanceador:"
+          for tg in tg-user tg-catalog tg-subs; do
+            ARN=$(aws elbv2 describe-target-groups --names $tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null) || continue
+            echo "$tg: $(aws elbv2 describe-target-health --target-group-arn $ARN --query 'TargetHealthDescriptions[].TargetHealth.State' --output text 2>/dev/null)"
+          done

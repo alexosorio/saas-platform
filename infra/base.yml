@@ -25,6 +25,13 @@ Parameters:
     MinValue: 1
     MaxValue: 35
     Description: Días de copias automáticas de RDS (si tu plan gratuito lo limita, usa 1)
+  CloudFrontPrefixListId:
+    Type: String
+    Default: ""
+    Description: >-
+      ID de la lista administrada com.amazonaws.global.cloudfront.origin-facing en esta región
+      (aws ec2 describe-managed-prefix-lists --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing).
+      Sin ella, CloudFront no puede llegar al balanceador interno por el origen VPC.
   MigratorImageTag:
     Type: String
     Default: latest
@@ -43,6 +50,7 @@ Parameters:
 
 Conditions:
   ConSuperadmin: !Not [!Equals [!Ref SuperadminEmail, ""]]
+  ConPrefijoCloudFront: !Not [!Equals [!Ref CloudFrontPrefixListId, ""]]
 
 Resources:
   # ─── Red ─────────────────────────────────────────────────────────────
@@ -147,10 +155,14 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: saas-alb
-      GroupDescription: Balanceador interno - solo trafico de dentro de la VPC (origen VPC de CloudFront)
+      GroupDescription: Balanceador interno - solo CloudFront (origen VPC) y la propia VPC
       VpcId: !Ref Vpc
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: Origen VPC de CloudFront }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: Desde la VPC }
+        - !If
+          - ConPrefijoCloudFront
+          - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontPrefixListId, Description: CloudFront origin-facing }
+          - !Ref AWS::NoValue
       Tags: [{ Key: Name, Value: saas-alb }]
 
   AppsSecurityGroup:
