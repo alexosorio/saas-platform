@@ -41,7 +41,7 @@ Todo en la región de tu cuenta (`us-east-2` para cuentas nuevas desde Colombia)
      --query "Stacks[0].Outputs[?OutputKey=='GitHubDeployRoleArn'].OutputValue" --output text
    ```
 
-   Si la cuenta ya tenía el proveedor OIDC de GitHub, agrega `CrearProveedorOidc=false`.
+   Si la cuenta ya tenía el proveedor OIDC de GitHub, agrega `CrearProveedorOidc=false`. Los IDs numéricos del dueño y del repo ya vienen por defecto (`GitHubOwnerId`, `GitHubRepoId`); GitHub los usa en los tokens de repos creados desde julio de 2026.
 
 4. **Variables en GitHub** (Settings → Secrets and variables → Actions → Variables):
 

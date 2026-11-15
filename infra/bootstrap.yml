@@ -10,6 +10,16 @@ Parameters:
     Default: alexosorio/saas-platform
     AllowedPattern: "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
     Description: Repositorio dueño/nombre que puede desplegar
+  GitHubOwnerId:
+    Type: String
+    Default: "1087900"
+    AllowedPattern: "[0-9]+"
+    Description: ID numérico del dueño (gh api repos/<dueño>/<repo> --jq .owner.id)
+  GitHubRepoId:
+    Type: String
+    Default: "1459014852"
+    AllowedPattern: "[0-9]+"
+    Description: ID numérico del repositorio (gh api repos/<dueño>/<repo> --jq .id)
   CrearProveedorOidc:
     Type: String
     Default: "true"
@@ -87,9 +97,19 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
+                # Repos creados desde julio de 2026 firman con IDs inmutables:
+                #   repo:<dueño>@<id>/<repo>@<id>:...   (se aceptan ambos formatos)
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubRepo}:environment:production
                   - !Sub repo:${GitHubRepo}:ref:refs/heads/main
+                  - !Sub
+                    - "repo:${Duenio}@${GitHubOwnerId}/${Repo}@${GitHubRepoId}:environment:production"
+                    - Duenio: !Select [0, !Split ["/", !Ref GitHubRepo]]
+                      Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
+                  - !Sub
+                    - "repo:${Duenio}@${GitHubOwnerId}/${Repo}@${GitHubRepoId}:ref:refs/heads/main"
+                    - Duenio: !Select [0, !Split ["/", !Ref GitHubRepo]]
+                      Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
       Policies:
         - PolicyName: despliegue-saas
           PolicyDocument:
@@ -166,6 +186,9 @@ Resources:
                 Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
 
 Outputs:
+  ProveedorOidc:
+    Description: Proveedor OIDC de GitHub que valida los tokens
+    Value: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
   GitHubDeployRoleArn:
     Description: Valor de la variable AWS_ROLE_ARN en GitHub
     Value: !GetAtt GitHubDeployRole.Arn
