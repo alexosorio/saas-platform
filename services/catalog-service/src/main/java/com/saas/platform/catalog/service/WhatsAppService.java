@@ -101,7 +101,7 @@ public class WhatsAppService {
 
         try {
             ResponseEntity<String> resp = rest.exchange(url, HttpMethod.POST, new HttpEntity<>(body, headers), String.class);
-            log.info("WhatsApp enviado a {} (status {})", telefono, resp.getStatusCodeValue());
+            log.info("WhatsApp enviado a {} (status {})", telefono, resp.getStatusCode().value());
         } catch (HttpStatusCodeException ex) {
             log.error("WhatsApp API error {}: {}", ex.getStatusCode(), ex.getResponseBodyAsString());
             throw new BusinessException("WhatsApp API respondió: " + ex.getStatusCode());
