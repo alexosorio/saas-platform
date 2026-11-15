@@ -1,5 +1,5 @@
 {
-  "SuperadminEmail": "",
+  "SuperadminEmail": "aosorio@utb.edu.co",
   "SuperadminNombre": "Alexander",
   "SuperadminApellido": "Osorio",
   "DbInstanceClass": "db.t4g.micro",
