@@ -76,6 +76,22 @@ jobs:
           echo "Servicios: $S"
           echo "servicios=$S" >> "$GITHUB_OUTPUT"
 
+  aws:
+    name: ¿AWS conectado?
+    # Solo en main. Mira si el rol está como variable o como secreto (los secretos no se pueden leer en un "if").
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      listo: ${{ steps.rol.outputs.listo }}
+    steps:
+      - id: rol
+        env:
+          ROL: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -n "$ROL" ]; then echo "listo=true" >> "$GITHUB_OUTPUT"
+          else echo "listo=false" >> "$GITHUB_OUTPUT"; echo "::notice::Sin AWS_ROLE_ARN: solo se compila."; fi
+
   compilar:
     name: Compilar ${{ matrix.servicio }}
     needs: cambios
@@ -108,9 +124,9 @@ jobs:
 
   imagenes:
     name: Imágenes
-    needs: [cambios, compilar]
-    # Solo en main y cuando AWS ya está conectado (variable AWS_ROLE_ARN definida en GitHub)
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != '' && needs.cambios.outputs.servicios != '[]'
+    needs: [cambios, compilar, aws]
+    # Solo en main y cuando AWS ya está conectado (AWS_ROLE_ARN como variable o secreto)
+    if: needs.aws.outputs.listo == 'true' && needs.cambios.outputs.servicios != '[]'
     uses: ./.github/workflows/imagenes.yml
     secrets: inherit
     permissions:

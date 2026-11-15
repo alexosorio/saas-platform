@@ -38,11 +38,27 @@ jobs:
       - name: Scripts
         run: for f in infra/scripts/*.sh database/migrar.sh; do bash -n "$f"; done
 
+  aws:
+    name: ¿AWS conectado?
+    # Solo en main. Mira si el rol está como variable o como secreto (los secretos no se pueden leer en un "if").
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      listo: ${{ steps.rol.outputs.listo }}
+    steps:
+      - id: rol
+        env:
+          ROL: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -n "$ROL" ]; then echo "listo=true" >> "$GITHUB_OUTPUT"
+          else echo "listo=false" >> "$GITHUB_OUTPUT"; echo "::notice::Sin AWS_ROLE_ARN: solo se compila."; fi
+
   base:
     name: Stack saas-base
-    needs: validar
-    # Solo en main y cuando AWS ya está conectado (variable AWS_ROLE_ARN definida en GitHub)
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != ''
+    needs: [validar, aws]
+    # Solo en main y cuando AWS ya está conectado (AWS_ROLE_ARN como variable o secreto)
+    if: needs.aws.outputs.listo == 'true'
     runs-on: ubuntu-latest
     environment: production
     permissions:
