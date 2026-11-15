@@ -3,5 +3,6 @@
   "SuperadminNombre": "Alexander",
   "SuperadminApellido": "Osorio",
   "DbInstanceClass": "db.t4g.micro",
-  "DbBackupRetentionDays": "1"
+  "DbBackupRetentionDays": "1",
+  "CloudFrontPrefixListId": "pl-b6a144df"
 }
