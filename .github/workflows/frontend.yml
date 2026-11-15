@@ -1,0 +1,87 @@
+# Frontend: compila las 3 apps y, en main, las publica en S3 + CloudFront.
+# Las APIs se llaman con rutas relativas (/api-usuarios, ...), así que el mismo build sirve con o sin dominio.
+name: Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "deploy/aws/deploy-frontend.sh"
+      - ".github/workflows/frontend.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compilar:
+    name: Compilar
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Variables de producción
+        run: |
+          for app in security catalog subscription; do
+            cat > "apps/$app/.env.production" <<'ENV'
+          VITE_API_URL=/api-usuarios
+          VITE_USER_API_URL=/api-usuarios
+          VITE_CATALOG_API_URL=/api-catalogo
+          VITE_SUBSCRIPTION_API_URL=/api-suscripciones
+          VITE_INACTIVITY_MINUTES=30
+          ENV
+          done
+      - run: npm ci
+      - run: npm run build:all
+      - uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: |
+            frontend/apps/security/dist
+            frontend/apps/catalog/dist
+            frontend/apps/subscription/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  desplegar:
+    name: Publicar en S3 + CloudFront
+    needs: compilar
+    # Solo en main y cuando AWS ya está conectado (variable AWS_ROLE_ARN definida en GitHub)
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend/apps
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Subir e invalidar caché
+        env:
+          BUCKET: ${{ vars.FRONTEND_BUCKET }}
+          DIST_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+          SKIP_BUILD: "1"
+        run: ./deploy/aws/deploy-frontend.sh

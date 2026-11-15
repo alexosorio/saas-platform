@@ -1,0 +1,9 @@
+<!-- Contenido del correo de bienvenida. El marco lo pone EmailLayout. -->
+<div xmlns:th="http://www.thymeleaf.org">
+  <p style="margin:0 0 14px;">Hola <strong th:text="${nombre}">Usuario</strong>,</p>
+  <p style="margin:0 0 20px;">Tu correo quedó verificado<span th:if="${orgNombre}"> y ya puedes trabajar en <strong th:text="${orgNombre}">tu organización</strong></span>. ¡Bienvenido!</p>
+  <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:8px auto 22px;"><tr><td style="border-radius:8px;background:#a871bd;">
+    <a th:href="${appUrl}" href="#" target="_blank" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">Entrar a la plataforma</a>
+  </td></tr></table>
+  <p style="margin:0;font-size:13px;color:#666;">Gracias por unirte.</p>
+</div>

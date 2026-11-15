@@ -1,0 +1,24 @@
+{
+  "name": "@saas/ui-shell",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./shell.css": "./src/shell.css"
+  },
+  "files": ["dist", "src/shell.css"],
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18",
+    "react-router-dom": ">=6",
+    "react-icons": ">=4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5"
+  }
+}

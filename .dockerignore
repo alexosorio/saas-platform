@@ -1,0 +1,9 @@
+**/target
+**/node_modules
+**/dist
+**/.env
+.git
+.github
+frontend
+database
+deploy/aws

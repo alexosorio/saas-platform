@@ -1,0 +1,22 @@
+# Compilados
+target/
+dist/
+node_modules/
+*.class
+*.jar
+!**/.mvn/wrapper/*.jar
+
+# Configuración local y secretos (los .example sí van al repo)
+.env
+.env.*
+!.env.example
+**/.env.production
+deploy/aws/sin-dominio/generadas/
+
+# IDE / sistema
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log
+logs/

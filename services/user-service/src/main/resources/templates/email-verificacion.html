@@ -1,0 +1,24 @@
+<!-- Contenido del correo de verificación. El marco (logo de la organización, pie) lo pone EmailLayout. -->
+<div xmlns:th="http://www.thymeleaf.org">
+  <p style="margin:0 0 14px;">Hola <strong th:text="${nombre}">Usuario</strong>,</p>
+  <p style="margin:0 0 20px;">
+    <span th:if="${orgNombre}">Tu cuenta en <strong th:text="${orgNombre}">la organización</strong> está casi lista.</span>
+    <span th:unless="${orgNombre}">Tu cuenta está casi lista.</span>
+    Confirma que este correo es tuyo para empezar a usarla:
+  </p>
+  <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:8px auto 22px;"><tr><td style="border-radius:8px;background:#a871bd;">
+    <a th:href="${enlace}" href="#" target="_blank" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">Verificar mi correo</a>
+  </td></tr></table>
+  <p style="margin:0 0 6px;font-size:13px;color:#666;">
+    El enlace es válido por <strong th:text="${validezHoras}">48</strong> horas. Si el botón no abre, copia esta dirección en tu navegador:
+  </p>
+  <p style="margin:0 0 22px;font-size:12px;word-break:break-all;">
+    <a th:href="${enlace}" th:text="${enlace}" href="#" style="color:#693a84;">https://…</a>
+  </p>
+  <div style="border:1px dashed #a871bd;border-radius:8px;padding:14px;text-align:center;margin:0 0 18px;">
+    <div style="font-size:13px;color:#666;margin-bottom:6px;">¿Prefieres escribirlo? Tu código de verificación:</div>
+    <div style="font-size:28px;font-weight:bold;letter-spacing:6px;color:#693a84;" th:text="${codigo}">123456</div>
+    <div style="font-size:12px;color:#888;margin-top:6px;">Válido por <span th:text="${validezMinutos}">30</span> minutos.</div>
+  </div>
+  <p style="margin:0;font-size:13px;color:#666;">Hasta que confirmes tu correo no podrás hacer operaciones en la plataforma. Si no creaste esta cuenta, ignora este mensaje.</p>
+</div>

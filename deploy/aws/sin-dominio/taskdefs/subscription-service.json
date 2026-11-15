@@ -1,0 +1,35 @@
+{
+  "family": "saas-subscription-service",
+  "networkMode": "awsvpc", "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512", "memory": "1024",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::__ACCOUNT__:role/ecsTaskExecutionRole",
+  "containerDefinitions": [{
+    "name": "app",
+    "image": "__ACCOUNT__.dkr.ecr.__REGION__.amazonaws.com/saas/subscription-service:__TAG__",
+    "essential": true,
+    "portMappings": [{ "containerPort": 8084 }],
+    "environment": [
+      { "name": "SERVER_PORT", "value": "8084" },
+      { "name": "SERVER_SERVLET_CONTEXT_PATH", "value": "/api-suscripciones" },
+      { "name": "DB_HOST", "value": "__RDS_ENDPOINT__" },
+      { "name": "DB_PORT", "value": "5432" },
+      { "name": "DB_NAME", "value": "saas_platform" },
+      { "name": "DB_USER", "value": "saas_app" },
+      { "name": "APP_URL", "value": "https://__CF_DOMAIN__" },
+      { "name": "CORS_ORIGINS", "value": "https://__CF_DOMAIN__" },
+      { "name": "RABBITMQ_HOST", "value": "rabbitmq.saas.local" },
+      { "name": "RABBITMQ_PORT", "value": "5672" },
+      { "name": "RABBITMQ_USER", "value": "saas" },
+      { "name": "SUSCRIPCIONES_ZONA", "value": "America/Bogota" },
+      { "name": "LOG_LEVEL", "value": "INFO" }
+    ],
+    "secrets": [
+      { "name": "DB_PASSWORD", "valueFrom": "arn:aws:ssm:__REGION__:__ACCOUNT__:parameter/saas/prod/DB_PASSWORD" },
+      { "name": "JWT_SECRET", "valueFrom": "arn:aws:ssm:__REGION__:__ACCOUNT__:parameter/saas/prod/JWT_SECRET" },
+      { "name": "RABBITMQ_PASSWORD", "valueFrom": "arn:aws:ssm:__REGION__:__ACCOUNT__:parameter/saas/prod/RABBITMQ_PASSWORD" }
+    ],
+    "logConfiguration": { "logDriver": "awslogs", "options": {
+      "awslogs-group": "/ecs/saas-prod", "awslogs-region": "__REGION__", "awslogs-stream-prefix": "subscription-service" } }
+  }]
+}

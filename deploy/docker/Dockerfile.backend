@@ -1,0 +1,26 @@
+# Imagen de cualquier backend de la plataforma. Se construye desde la RAÍZ del repo:
+#   docker build -f deploy/docker/Dockerfile.backend --build-arg SERVICE=catalog-service -t catalog-service .
+# SERVICE = nombre de la carpeta en services/ (user-service, catalog-service, subscription-service, notification-service)
+
+# 1) Compilación: Java 25 (LTS). Primero las librerías compartidas de libs/, luego el servicio.
+FROM maven:3.9-eclipse-temurin-25 AS build
+WORKDIR /build
+COPY libs/ libs/
+RUN for d in libs/*/; do (cd "$d" && mvn -q -B -DskipTests install); done
+
+ARG SERVICE
+RUN test -n "$SERVICE" || (echo "Falta --build-arg SERVICE=<carpeta de services/>" && exit 1)
+COPY services/${SERVICE}/pom.xml services/${SERVICE}/pom.xml
+RUN cd services/${SERVICE} && (mvn -q -B dependency:go-offline || true)
+COPY services/${SERVICE}/src services/${SERVICE}/src
+RUN cd services/${SERVICE} && mvn -q -B -DskipTests package && cp target/*.jar /build/app.jar
+
+# 2) Ejecución: solo el JRE
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+COPY --from=build /build/app.jar app.jar
+# Heap hasta el 75 % de la memoria de la tarea; zona horaria de Colombia
+# (el bloqueo de suscripciones compara fechas con LocalDate.now())
+ENV TZ=America/Bogota \
+    JAVA_OPTS="-XX:MaxRAMPercentage=75 -Duser.timezone=America/Bogota"
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

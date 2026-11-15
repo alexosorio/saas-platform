@@ -1,0 +1,133 @@
+# Plataforma completa en local: PostgreSQL (con database/schema.sql), RabbitMQ, los 4 servicios y el frontend.
+#   docker compose up --build                       -> todo; frontend en http://localhost:3000
+#   docker compose up --build postgres user-service -> solo lo que nombres
+#   docker compose down -v                           -> borra la base local (al subir se vuelve a cargar schema.sql)
+# Valores opcionales en un archivo .env junto a este (ver .env.example).
+name: saas-platform
+
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: deploy/docker/Dockerfile.backend
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: saas_platform                  # schema.sql usa este nombre
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}  # obligatoria al crear la base
+      TZ: America/Bogota
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro   # solo corre con el volumen vacío
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d saas_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports: ["5672:5672", "15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  user-service:
+    <<: *backend
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.backend, args: { SERVICE: user-service } }
+    environment:
+      SERVER_PORT: 8082
+      DB_HOST: postgres
+      DB_NAME: saas_platform
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:-ClaveSecretaCompartidaSaaSPlatform256BitsMinimoParaHS512SeguraYLarga}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}     # vacío = no envía correos (verifica a mano desde Usuarios)
+      MAIL_FROM: ${MAIL_FROM:-noreply@tuapp.com}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-SaaS Platform}
+      APP_MAIL_BRAND_NAME: ${APP_MAIL_BRAND_NAME:-SaaS Platform}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports: ["8082:8082"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  catalog-service:
+    <<: *backend
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.backend, args: { SERVICE: catalog-service } }
+    environment:
+      SERVER_PORT: 8083
+      DB_HOST: postgres
+      DB_NAME: saas_platform
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:-ClaveSecretaCompartidaSaaSPlatform256BitsMinimoParaHS512SeguraYLarga}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000/catalog}
+      UPLOADS_DIR: /data/uploads
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-noreply@tuapp.com}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-SaaS Platform}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+    volumes: ["uploads:/data/uploads"]
+    ports: ["8083:8083"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  subscription-service:
+    <<: *backend
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.backend, args: { SERVICE: subscription-service } }
+    environment:
+      SERVER_PORT: 8084
+      DB_HOST: postgres
+      DB_NAME: saas_platform
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:-ClaveSecretaCompartidaSaaSPlatform256BitsMinimoParaHS512SeguraYLarga}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports: ["8084:8084"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  notification-service:
+    <<: *backend
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.backend, args: { SERVICE: notification-service } }
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      USER_SERVICE_URL: http://user-service:8082
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-noreply@tuapp.com}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-SaaS Platform}
+      APP_MAIL_BRAND_NAME: ${APP_MAIL_BRAND_NAME:-SaaS Platform}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+    depends_on: { rabbitmq: { condition: service_healthy } }
+
+  frontend:
+    build: { context: ./frontend, dockerfile: docker/Dockerfile }
+    ports: ["3000:80"]
+    depends_on: [user-service, catalog-service, subscription-service]
+
+volumes:
+  pgdata:
+  uploads:

@@ -1,0 +1,11 @@
+<!-- Enlace de recuperación de contraseña. El marco lo pone EmailLayout. -->
+<div xmlns:th="http://www.thymeleaf.org">
+  <p style="margin:0 0 14px;">Hola <strong th:text="${nombre}">Usuario</strong>,</p>
+  <p style="margin:0 0 20px;">Haz clic en el botón para crear una contraseña nueva:</p>
+  <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:8px auto 22px;"><tr><td style="border-radius:8px;background:#a871bd;">
+    <a th:href="${resetLink}" href="#" target="_blank" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">Restablecer contraseña</a>
+  </td></tr></table>
+  <p style="margin:0 0 6px;font-size:13px;color:#666;">El enlace es válido por <span th:text="${validezMinutos}">60</span> minutos. Si el botón no abre, copia esta dirección:</p>
+  <p style="margin:0 0 18px;font-size:12px;word-break:break-all;"><a th:href="${resetLink}" th:text="${resetLink}" href="#" style="color:#693a84;">enlace</a></p>
+  <p style="margin:0;font-size:13px;color:#666;">Si no solicitaste este cambio, ignora este correo.</p>
+</div>

@@ -1,0 +1,16 @@
+{
+  "family": "saas-rabbitmq",
+  "networkMode": "awsvpc", "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256", "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::__ACCOUNT__:role/ecsTaskExecutionRole",
+  "containerDefinitions": [{
+    "name": "rabbitmq",
+    "image": "public.ecr.aws/docker/library/rabbitmq:4-management",
+    "essential": true,
+    "portMappings": [{ "containerPort": 5672 }, { "containerPort": 15672 }],
+    "environment": [{ "name": "RABBITMQ_DEFAULT_USER", "value": "saas" }],
+    "secrets": [{ "name": "RABBITMQ_DEFAULT_PASS", "valueFrom": "arn:aws:ssm:__REGION__:__ACCOUNT__:parameter/saas/prod/RABBITMQ_PASSWORD" }],
+    "logConfiguration": { "logDriver": "awslogs", "options": {
+      "awslogs-group": "/ecs/saas-prod", "awslogs-region": "__REGION__", "awslogs-stream-prefix": "rabbitmq" } }
+  }]
+}

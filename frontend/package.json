@@ -1,0 +1,20 @@
+{
+  "name": "saas-frontend-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:shell": "npm run build -w @saas/ui-shell",
+    "build:catalog": "npm run build -w saas-catalog-frontend",
+    "build:subscription": "npm run build -w saas-subscription-frontend",
+    "build:security": "npm run build -w saas-user-frontend",
+    "dev": "concurrently -n host,catalog,sub -c green,cyan,magenta \"npm:dev -w saas-user-frontend\" \"npm:dev -w saas-catalog-frontend\" \"npm:dev -w saas-subscription-frontend\"",
+    "build:all": "npm run build:shell && npm run build:catalog && npm run build:subscription && npm run build:security"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

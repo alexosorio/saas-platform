@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* font-roboto-applied */
+  html, body {
+    @apply bg-gray-50;
+    font-family: 'Roboto', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-primary-600 hover:bg-primary-700 text-white font-medium py-2 px-4 rounded-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2 px-4 rounded-lg transition duration-200;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition duration-200;
+  }
+
+  .card {
+    @apply bg-white rounded-lg shadow-md p-6;
+  }
+}
+
+@layer components {
+  /* Elevaciones estilo Material (Materialize) */
+  .z-depth-1 { box-shadow: 0 2px 5px 0 rgba(0,0,0,0.16), 0 2px 10px 0 rgba(0,0,0,0.12); }
+  .z-depth-2 { box-shadow: 0 8px 17px 0 rgba(0,0,0,0.2), 0 6px 20px 0 rgba(0,0,0,0.19); }
+
+  /* Item de menú lateral estilo Material */
+  .side-link {
+    @apply flex items-center gap-3 px-5 py-3 text-gray-700 rounded-r-full transition-colors;
+  }
+  .side-link:hover { @apply bg-primary-50 text-primary-700; }
+  .side-link.active {
+    @apply bg-primary-100 text-primary-700 font-medium;
+    box-shadow: inset 3px 0 0 0 var(--brand-600, #693a84);
+  }
+  .side-section-label {
+    @apply px-5 pt-4 pb-1 text-xs font-semibold uppercase tracking-wider text-gray-400;
+  }
+
+  /* Tarjeta tipo "menú macOS": translúcida, redondeada, con blur */
+  .mac-menu {
+    @apply rounded-2xl border border-black/10 bg-white/90 backdrop-blur-xl;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.18);
+  }
+}

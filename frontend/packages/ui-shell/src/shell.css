@@ -1,0 +1,91 @@
+/* Colores de marca (mismos valores que packages/ui-shell/theme.js) */
+:root {
+  --brand-400: #a871bd;
+  --brand-600: #693a84;
+  --brand-ring: rgba(105, 58, 132, 0.18);
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+/* Base compacta: reduce el tamaño global (Tailwind usa rem) */
+html { font-size: 14px; }
+
+.ui-shell, .ui-shell * { font-family: 'Roboto', system-ui, -apple-system, sans-serif; }
+
+.ui-z1 { box-shadow: 0 1px 3px 0 rgba(0,0,0,0.12), 0 1px 6px 0 rgba(0,0,0,0.10); }
+
+.ui-mac-menu {
+  border-radius: 14px;
+  border: 1px solid rgba(0,0,0,0.10);
+  background: rgba(255,255,255,0.94);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.16);
+}
+
+.ui-side-link {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 16px;
+  font-size: 0.875rem;
+  border-radius: 0 999px 999px 0;
+  transition: background-color .15s, color .15s, box-shadow .15s;
+}
+.ui-side-link svg { font-size: 0.95rem; flex-shrink: 0; }
+
+.ui-section-label {
+  padding: 11px 16px 2px;
+  font-size: 0.66rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+
+/* ── Controles de formulario unificados (todas las apps) ───────────────────
+   :where() => especificidad 0: las utilidades de Tailwind (w-16, pl-9, text-sm…)
+   siempre pueden ajustar un campo puntual. Inputs, selects, fechas y
+   autocompletes quedan con la misma altura, borde, letra y foco. */
+:where(.input-field) {
+  display: block;
+  width: 100%;
+  height: 2.5rem;
+  padding: 0 0.75rem;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  color: #111827;
+  background-color: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+:where(.input-field)::placeholder { color: #9ca3af; }
+:where(.input-field):focus {
+  border-color: var(--brand-600);
+  box-shadow: 0 0 0 3px var(--brand-ring);
+}
+:where(.input-field):disabled { background-color: #f3f4f6; color: #6b7280; cursor: not-allowed; }
+
+/* Select: sin la apariencia nativa (que es la que lo hacía verse más grueso) y con flecha propia */
+:where(select.input-field) {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 2rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%239ca3af'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z' clip-rule='evenodd'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 1rem;
+  cursor: pointer;
+}
+:where(select.input-field[multiple]) { height: auto; padding: 0.4rem 0.75rem; background-image: none; }
+
+/* Textarea: alto libre */
+:where(textarea.input-field) { height: auto; min-height: 5rem; padding: 0.5rem 0.75rem; }
+
+/* Fecha y número: misma altura que el resto */
+:where(input[type="date"].input-field, input[type="number"].input-field) { padding-right: 0.5rem; }
+
+/* Variante compacta para filtros en línea */
+:where(.input-field.input-sm) { height: 2rem; font-size: 0.85rem; padding-left: 0.5rem; }
+:where(select.input-field.input-sm) { padding-right: 1.75rem; background-position: right 0.4rem center; }
+
+/* Checkbox y radio del mismo color de la marca */
+:where(input[type="checkbox"], input[type="radio"]) { accent-color: var(--brand-600); }
