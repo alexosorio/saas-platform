@@ -47,6 +47,14 @@ Todo en la región de tu cuenta (`us-east-2` para cuentas nuevas desde Colombia)
 
    El segundo comando imprime `AccessKeyId` y `SecretAccessKey`. La clave secreta solo se muestra esa vez.
 
+   En una cuenta que nunca ha usado ECS, crea también su rol de servicio (si responde que ya existe, no pasa nada):
+
+   ```bash
+   aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com
+   ```
+
+   Sin él, la primera creación de `saas-base` falla en `Cluster` con *Unable to assume the service linked role*.
+
    **Por qué un usuario y no OIDC:** las cuentas creadas con el registro nuevo de AWS (`settings.aws.com`) tienen una política de la organización que bloquea `iam:*Provider*`, así que GitHub no puede registrarse como proveedor OIDC. El usuario `saas-github-ci` solo puede asumir el rol `saas-github-deploy`: su clave no da acceso a nada más, y cada ejecución trabaja con una sesión temporal del rol. Si algún día activas las funciones avanzadas de la cuenta, vuelve a desplegar con `ModoAcceso=oidc`, borra los dos secretos y el usuario deja de existir.
 
 4. **GitHub** (repo → Settings):
