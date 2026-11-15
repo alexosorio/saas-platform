@@ -107,9 +107,8 @@ public class ListaPreciosService {
         return toPrecioDTO(precioRepo.save(precio));
     }
 
-    @Transactional
     /** Borra TODOS los overrides manuales de una lista para que aplique la formula. Org-scoped. */
-    @org.springframework.transaction.annotation.Transactional
+    @Transactional
     public int limpiarOverrides(Long listaId, Long orgId) {
         ListaPrecios lista = repo.findById(listaId)
             .orElseThrow(() -> new ResourceNotFoundException("Lista no encontrada"));
@@ -120,6 +119,7 @@ public class ListaPreciosService {
         return (int) n;
     }
 
+    @Transactional
     public void eliminarPrecio(Long precioId) { precioRepo.deleteById(precioId); }
 
     private ListaPreciosDTO toDTO(ListaPrecios l) {

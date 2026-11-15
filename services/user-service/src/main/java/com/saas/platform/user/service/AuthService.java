@@ -90,11 +90,6 @@ public class AuthService {
     }
     
     /**
-     * Registrar nuevo usuario
-     */
-    @Transactional
-
-    /**
      * Asistente de registro: crea la organización y su usuario PROPIETARIO, y deja la sesión iniciada.
      * La suscripción de prueba la crea luego el subscription-service con el token devuelto.
      */
@@ -155,6 +150,10 @@ public class AuthService {
                 .build();
     }
 
+    /**
+     * Registrar nuevo usuario
+     */
+    @Transactional
     public AuthResponse register(RegisterRequest request) {
         // Validar que el email no exista
         if (usuarioRepository.existsByEmail(request.getEmail())) {

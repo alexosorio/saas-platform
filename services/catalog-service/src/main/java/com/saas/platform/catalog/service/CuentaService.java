@@ -107,8 +107,6 @@ public class CuentaService {
         cxpRepo.save(c);
     }
 
-    // ── Cuentas por cobrar ───────────────────────────────────
-    @Transactional(readOnly = true)
     /** Cuentas por pagar paginadas; el resumen trae el saldo pendiente y el total de TODO el filtro. */
     @Transactional(readOnly = true)
     public com.saas.platform.catalog.dto.PaginaDTO<CuentaPorPagarDTO> paginarPorPagar(Long orgId, FiltroCuentas f, Integer page, Integer size) {
@@ -149,6 +147,8 @@ public class CuentaService {
         return l;
     }
 
+    // ── Cuentas por cobrar ───────────────────────────────────
+    @Transactional(readOnly = true)
     public List<CuentaPorCobrarDTO> listarPorCobrar(Long orgId, FiltroCuentas f) {
         return cxcRepo.findAll(filtro(orgId, f, "cliente", f.getClienteId()),
                 org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "createdAt"))
