@@ -155,7 +155,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: saas-alb
-      GroupDescription: Balanceador interno - solo CloudFront (origen VPC) y la propia VPC
+      GroupDescription: Balanceador interno - solo trafico de dentro de la VPC (origen VPC de CloudFront)
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: Desde la VPC }
