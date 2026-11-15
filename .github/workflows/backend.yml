@@ -85,6 +85,12 @@ jobs:
     needs: cambios
     if: needs.cambios.outputs.servicios != '[]'
     runs-on: ubuntu-latest
+    env:
+      # Maven Central responde 429 cuando muchos runners descargan a la vez: más reintentos y más espera
+      MAVEN_ARGS: >-
+        -Daether.connector.http.retryHandler.count=8
+        -Daether.connector.http.retryHandler.interval=10000
+        -Daether.connector.http.retryHandler.serviceUnavailable=429,503
     strategy:
       fail-fast: false
       matrix:
