@@ -3,5 +3,5 @@
   "SuperadminNombre": "Alexander",
   "SuperadminApellido": "Osorio",
   "DbInstanceClass": "db.t4g.micro",
-  "DbBackupRetentionDays": "7"
+  "DbBackupRetentionDays": "1"
 }
