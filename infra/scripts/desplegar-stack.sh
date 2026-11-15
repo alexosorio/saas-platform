@@ -26,8 +26,9 @@ esperar_libre() {
 
 eventos_fallidos() {
   echo "Últimos errores de $STACK:"
-  aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 40 \
-    --query 'StackEvents[?contains(ResourceStatus, `FAILED`)].[Timestamp, LogicalResourceId, ResourceStatusReason]' \
+  # Todos los eventos (el rollback genera decenas) y sin los "cancelled", que son consecuencia del primero
+  aws cloudformation describe-stack-events --stack-name "$STACK" \
+    --query 'StackEvents[?ends_with(ResourceStatus, `FAILED`) && ResourceStatusReason != `Resource creation cancelled`].[Timestamp, LogicalResourceId, ResourceStatus, ResourceStatusReason]' \
     --output text 2>/dev/null | head -15 || true
 }
 
